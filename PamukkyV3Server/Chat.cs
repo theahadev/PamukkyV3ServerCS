@@ -18,6 +18,8 @@ class ChatMessage
     public bool isPinned = false;
     public List<string> mentionUIDs = new();
     public List<UserMessageRead> readByUIDs = new();
+    public bool isEdited = false;
+    public DateTime? editTime = new();
 
     #region Backwards compatibility
     public string sender
@@ -178,6 +180,8 @@ class ChatMessageFormatted : ChatMessage
         forwardedFromUID = msg.forwardedFromUID;
         isPinned = msg.isPinned;
         readByUIDs = msg.readByUIDs;
+        isEdited = msg.isEdited;
+        editTime = msg.editTime;
         //senderuser = profileShort.fromProfile(userProfile.Get(sender));
         //if (forwardedfrom != null) {
         //    forwardedname = profileShort.fromProfile(userProfile.Get(forwardedfrom)).name;
@@ -254,6 +258,8 @@ class ChatMessageFormatted : ChatMessage
         d["forwardedFromUID"] = forwardedFromUID;
         d["isPinned"] = isPinned;
         d["readBy"] = readBy;
+        d["isEdited"] = isEdited;
+        d["editTime"] = editTime;
         return d;
     }
 }
@@ -263,7 +269,7 @@ class ChatMessageFormatted : ChatMessage
 /// </summary>
 class Chat : OrderedDictionary<string, ChatMessage>
 {
-    public static string[] mentionStrings = {"room", "chat", "everyone", "all"};
+    public static string[] mentionStrings = { "room", "chat", "everyone", "all" };
 
     /// <summary>
     /// Dictionary to hold chats.
@@ -419,7 +425,7 @@ class Chat : OrderedDictionary<string, ChatMessage>
     void AddUpdate(Dictionary<string, object?> update)
     {
         wasUpdated = true;
-        
+
         string eventName = (update["event"] ?? "").ToString() ?? "";
 
         if (eventName == "DELETED")
@@ -728,7 +734,7 @@ class Chat : OrderedDictionary<string, ChatMessage>
             while (index <= toi)
             { // ... and count to high one
                 //Console.WriteLine(index);
-                chatPart.Add(Keys.ElementAt(index), Values.ElementAt(index) ?? new ChatMessage() {content = "Sorry, this message looks like it's corrupt.", senderUID = "0"});
+                chatPart.Add(Keys.ElementAt(index), Values.ElementAt(index) ?? new ChatMessage() { content = "Sorry, this message looks like it's corrupt.", senderUID = "0" });
                 ++index;
             }
 
@@ -798,7 +804,7 @@ class Chat : OrderedDictionary<string, ChatMessage>
                 content = msg.content,
                 sendTime = msg.sendTime
             };
-            
+
             if (previewMode)
             {
                 ret.content = ret.content.Split("\n")[0];
@@ -833,7 +839,7 @@ class Chat : OrderedDictionary<string, ChatMessage>
         return pinnedMessages;
     }
     #endregion
-    
+
     #region Message actions
     /// <summary>
     /// Sends a message to the chat
@@ -871,12 +877,58 @@ class Chat : OrderedDictionary<string, ChatMessage>
                     UserConfig? uc = await UserConfig.Get(member);
                     if (uc != null && uc.CanSendNotification(chatID, message.mentionUIDs.Contains(member) || message.mentionUIDs.Contains("[CHAT]")))
                     {
-                        Notifications.Get(member).AddNotification(notification);
+                        Notifications.Get(member).AddNotification(notification, chatID + "/" + id);
                     }
                 }
             }
         }
 
+    }
+
+    public async void EditMessage(string msgID, string newContent, DateTime? editTime = null)
+    {
+        if (!ContainsKey(msgID)) return;
+
+        if (editTime == null) editTime = DateTime.Now;
+
+        var message = this[msgID];
+
+        if (message.forwardedFromUID != null) return;
+
+        if (message.content == newContent) return;
+
+        message.isEdited = true;
+        message.content = newContent;
+        message.editTime = editTime;
+
+        ChatMessageFormatted? f = FormatMessage(msgID);
+        if (f != null)
+        {
+            f.isEdited = true;
+            f.content = newContent;
+            f.editTime = editTime;
+        }
+
+        Dictionary<string, object?> update = new();
+        update["event"] = "EDITED";
+        update["content"] = newContent;
+        update["editTime"] = editTime;
+        update["id"] = msgID;
+        AddUpdate(update);
+
+        // Edit notifications for members
+        var notification = new MessageNotification()
+        {
+            user = ShortProfile.FromProfile(await UserProfile.Get(message.senderUID)), //Probably would stay like this
+            userid = message.senderUID,
+            content = message.content,
+            chatid = chatID
+        };
+
+        foreach (string member in group.members.Keys)
+        {
+            Notifications.Get(member).EditNotification(notification, chatID + "/" + msgID);
+        }
     }
 
     /// <summary>
@@ -891,6 +943,12 @@ class Chat : OrderedDictionary<string, ChatMessage>
             update["event"] = "DELETED";
             update["id"] = msgID;
             AddUpdate(update);
+
+            // Remove notification from members
+            foreach (string member in group.members.Keys)
+            {
+                Notifications.Get(member).RemoveNotification(chatID + "/" + msgID);
+            }
         }
     }
 
@@ -910,7 +968,7 @@ class Chat : OrderedDictionary<string, ChatMessage>
             ChatMessage msg = this[msgID];
             MessageReactions rect = msg.reactions;
             MessageEmojiReactions r = rect.Get(reaction, true);
-            
+
             // set sendtime if null (which is normally)
             if (sendTime == null) sendTime = DateTime.Now;
 
@@ -974,6 +1032,9 @@ class Chat : OrderedDictionary<string, ChatMessage>
             update["event"] = "READ";
             update["readTime"] = readTime;
             AddUpdate(update);
+
+            // Remove notification from user
+            Notifications.Get(userID).RemoveNotification(chatID + "/" + msgID);
         }
     }
 
@@ -985,53 +1046,51 @@ class Chat : OrderedDictionary<string, ChatMessage>
     /// <returns>Pinned status of the message.</returns>
     public bool PinMessage(string msgID, bool? val = null, string? userid = null)
     {
-        if (ContainsKey(msgID))
+        if (!ContainsKey(msgID)) return false;
+
+        var message = this[msgID];
+        if (val == null)
         {
-            var message = this[msgID];
-            if (val == null)
-            {
-                val = !message.isPinned;
-            }
-            if (message.isPinned == val)
-            {
-                return val.Value;
-            }
-            message.isPinned = val.Value;
-            if (message.isPinned == true)
-            {
-                GetPinnedMessages()[msgID] = message;
-            }
-            else
-            {
-                GetPinnedMessages().Remove(msgID);
-            }
-            ChatMessageFormatted? f = FormatMessage(msgID);
-            if (f != null)
-            {
-                f.isPinned = message.isPinned;
-                Dictionary<string, object?> update = new();
-                update["event"] = message.isPinned ? "PINNED" : "UNPINNED";
-                if (userid != null) update["userID"] = msgID;
-                update["id"] = msgID;
-                AddUpdate(update);
-            }
-
-            if (userid != null)
-            {
-                if (CanDo(userid, ChatAction.Send))
-                {
-                    ChatMessage pinmessage = new()
-                    {
-                        senderUID = "0",
-                        content = (message.isPinned ? "" : "UN") + "PINNEDMESSAGE|" + userid + "|" + msgID
-                    };
-                    SendMessage(pinmessage);
-                }
-            }
-
-            return message.isPinned;
+            val = !message.isPinned;
         }
-        return false;
+        if (message.isPinned == val)
+        {
+            return val.Value;
+        }
+        message.isPinned = val.Value;
+        if (message.isPinned == true)
+        {
+            GetPinnedMessages()[msgID] = message;
+        }
+        else
+        {
+            GetPinnedMessages().Remove(msgID);
+        }
+        ChatMessageFormatted? f = FormatMessage(msgID);
+        if (f != null)
+        {
+            f.isPinned = message.isPinned;
+            Dictionary<string, object?> update = new();
+            update["event"] = message.isPinned ? "PINNED" : "UNPINNED";
+            if (userid != null) update["userID"] = msgID;
+            update["id"] = msgID;
+            AddUpdate(update);
+        }
+
+        if (userid != null)
+        {
+            if (CanDo(userid, ChatAction.Send))
+            {
+                ChatMessage pinmessage = new()
+                {
+                    senderUID = "0",
+                    content = (message.isPinned ? "" : "UN") + "PINNEDMESSAGE|" + userid + "|" + msgID
+                };
+                SendMessage(pinmessage);
+            }
+        }
+
+        return message.isPinned;
     }
 
     #endregion
@@ -1054,7 +1113,7 @@ class Chat : OrderedDictionary<string, ChatMessage>
         }
 
         return false;
-    } 
+    }
     /// <summary>
     /// Helper function to detect if message has a mention to any user in the chat.
     /// </summary>
@@ -1076,7 +1135,7 @@ class Chat : OrderedDictionary<string, ChatMessage>
         }
 
         return mentions;
-    } 
+    }
     /// <summary>
     /// Helper function to detect if message has a mention to the target user.
     /// </summary>
@@ -1103,7 +1162,7 @@ class Chat : OrderedDictionary<string, ChatMessage>
             }
         }
         return false;
-    } 
+    }
     #endregion
 
     #region Permissions
@@ -1113,7 +1172,8 @@ class Chat : OrderedDictionary<string, ChatMessage>
         Send,
         React,
         Delete,
-        Pin
+        Pin,
+        Edit
     }
 
     public bool CanDo(string target, ChatAction action, string msgid = "")
@@ -1162,6 +1222,13 @@ class Chat : OrderedDictionary<string, ChatMessage>
         {
             if (this[msgid].senderUID == target)
             { // User can delete their own messages.
+                return true;
+            }
+        }
+        if (action == ChatAction.Edit)
+        {
+            if (this[msgid].senderUID == target && this[msgid].forwardedFromUID == null)
+            { // User can edit their own messages.
                 return true;
             }
         }
@@ -1243,7 +1310,8 @@ class Chat : OrderedDictionary<string, ChatMessage>
             if (connection != null)
             {
                 if (connection.connected == true) loadedChat = await connection.GetChat(id);
-                connection.Connected += async (_,_) =>
+                if (chatsCache.ContainsKey(loadedChat?.chatID ?? "")) return chatsCache[loadedChat?.chatID ?? ""];
+                connection.Connected += async (_, _) =>
                 {
                     Chat? newChat = await connection.GetChat(id);
                     if (newChat != null && loadedChat != null)
@@ -1271,7 +1339,7 @@ class Chat : OrderedDictionary<string, ChatMessage>
                 catch { } //Ignore...
             }
 
-            loadedChat.chatID = chatID;
+            if (loadedChat.chatID == "") loadedChat.chatID = chatID;
             loadedChat.isGroup = !chatID.Contains("-");
 
             if (loadedChat.isGroup)
@@ -1296,9 +1364,10 @@ class Chat : OrderedDictionary<string, ChatMessage>
             }
 
             chatsCache[chatID] = loadedChat;
+            chatsCache[loadedChat.chatID] = loadedChat;
         }
 
-        loadingChats.Remove(chatID);
+        try { loadingChats.Remove(chatID); } catch { }
         return loadedChat;
     }
 
