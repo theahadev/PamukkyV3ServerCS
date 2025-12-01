@@ -21,9 +21,9 @@ There's 2 ways to run inside docker:
 - Create a compose file with ```nano docker-compose.yml```
 ```yaml
 services:
-  pamukky:
+  pamukky-server:
     image: ghcr.io/kuskebabi/pamukkyv3server:latest
-    container_name: test-pamukky-server
+    container_name: pamukky-server
     ports:
       - "4268:4268"
     volumes:
@@ -31,13 +31,13 @@ services:
 #      - ./config.json:/App/config.json:ro
 #      - ./tos.txt:/App/tos.txt:ro
     restart: unless-stopped
+    user: "1000:1000"
     stdin_open: true
     tty: true
     environment:
       - ASPNETCORE_URLS=http://+:4268
     networks:
       - default
-    deploy:
 ```
 - (Optional) Create a Terms of Service file with ```nano tos.txt```. It will be shown to the users when they connect to your server.
 - (Optional) Create a Config file with ```nano config.json```.
